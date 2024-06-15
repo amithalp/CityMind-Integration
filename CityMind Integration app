@@ -1,0 +1,300 @@
+/* CityMind Integration app
+*  
+*	NOTES:  This app is used to keep track of your ARAD water meter after you have a username and password to the ReadYourMeterPro web site (https://rym-pro.com). 
+* 
+*    Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+*    http://www.apache.org/licenses/LICENSE-2.0  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
+*    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+*
+*	Change Revision History:  
+*	Ver		Date:		Who:		What:
+* 	1.0.0	2023-06-15	amithalp	Initial release version
+* 	
+*/
+definition(
+    name: "CityMind Integration",
+    namespace: "amithalp",
+    author: "Amit Halperin",
+    description: "Integration with CityMind API",
+    category: "My Apps",
+    iconUrl: "",
+    iconX2Url: "",
+    iconX3Url: ""
+)
+
+preferences {
+    page(name: "pageConfig")
+}
+
+def pageConfig() {
+    dynamicPage(name: "pageConfig", title: "", install: true, uninstall: true, refreshInterval:0) {
+        displayTitle()
+        section("<b>CityMind API Settings</b>") {
+            input "apiUri", "text", title: "API Base URI", required: true, defaultValue: "https://eu-customerportal-api.harmonyencoremdm.com", description: "The default value should not be changed unless instructed otherwise"
+            input "apiEmail", "text", title: "API Email", required: true, description: "This is the Email you registered to the Read Your Meter Pro website"
+            input "apiPassword", "password", title: "API Password", required: true, description: "This is the Password you registered to the Read Your Meter Pro website"
+            input "apiDeviceId", "text", title: "API Device ID", required: true, description: "Any string will do"
+        }
+        section("<b>Device Settings</b>") {
+            input "deviceName", "text", title: "Device Name", required: true, description: "The app will create a device with this name"
+            input "pollInterval", "number", title: "Poll Interval (minutes)", required: true, defaultValue: 60, description: "Set polling frequency"
+        }
+    }
+}
+
+def setVersion() {
+    state.name = "CityMind Integration"
+    state.version = "1.0.0"
+}
+
+def displayTitle() {
+    setVersion()
+    return section (getFormat("title", "App: ${state.name} - ver ${state.version}")) {}
+}
+
+def getFormat(type, text) {
+    if (type == "title") return "<h2>${text}</h2>"
+    // Add other formatting options as needed
+    return text
+}
+
+def installed() {
+    initialize()
+}
+
+def updated() {
+    unschedule()
+    initialize()
+}
+
+def initialize() {
+    state.accessToken = null
+    try {
+        login()
+    } catch (Exception e) {
+        log.error "Error during initialization: ${e.message}"
+    }
+    createMeterDevice()
+    schedulePolling()
+}
+
+def login() {
+    def params = [
+        uri: "${settings.apiUri}/consumer/login",
+        headers: ["Content-Type": "application/json"],
+        body: [
+            email: settings.apiEmail,
+            pw: settings.apiPassword,
+            deviceId: settings.apiDeviceId
+        ]
+    ]
+
+    pauseExecution(1000)
+
+    try {
+        httpPostJson(params) { resp ->
+            if (resp.status == 200) {
+                state.accessToken = resp.data.token
+                log.debug "Successfully logged in. Token: ${state.accessToken}"
+            } else {
+                log.error "Failed to log in: ${resp.status}"
+                log.error "Response body: ${resp.data}"
+                throw new Exception("Login failed with status ${resp.status}")
+            }
+        }
+    } catch (Exception e) {
+        log.error "Login error: ${e.message}"
+    }
+}
+
+def createMeterDevice() {
+    def meterId = settings.apiDeviceId
+    def device = getChildDevice(meterId)
+    if (!device) {
+        device = addChildDevice("amithalp", "CityMind Meter", meterId, [name: settings.deviceName, label: settings.deviceName, isComponent: false])
+        log.debug "Created new meter device with ID: ${meterId}"
+    } else {
+        device.setLabel(settings.deviceName)
+        log.debug "Meter device already exists with ID: ${meterId}, updated name to ${settings.deviceName}"
+    }
+    refreshDevice(meterId)
+}
+
+def refreshDevice(meterId) {
+    getAccountInfo(meterId)
+    getLastRead(meterId)
+    getDailyConsumption(meterId)
+    getMonthlyConsumption(meterId)
+    getConsumptionForecast(meterId)
+}
+
+def getAccountInfo(meterId) {
+    def params = [
+        uri: "${settings.apiUri}/consumer/me",
+        headers: [
+            "Content-Type": "application/json",
+            "x-access-token": state.accessToken
+        ]
+    ]
+
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200) {
+                def data = response.data
+                def device = getChildDevice(meterId)
+                device.sendEvent(name: "accountNumber", value: data.accountNumber)
+                device.sendEvent(name: "firstName", value: data.firstName)
+                device.sendEvent(name: "lastName", value: data.lastName)
+                device.sendEvent(name: "municipalId", value: data.municipalId)
+                device.sendEvent(name: "countryCode", value: data.phoneNumber.countryCode)
+                device.sendEvent(name: "phoneNumber", value: data.phoneNumber.phoneNumber)
+                log.debug "Account Info: ${data}"
+            } else {
+                log.error "Failed to fetch account info: ${response.status} ${response.data}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error fetching account info: ${e.message}"
+    }
+}
+
+def getLastRead(meterId) {
+    def params = [
+        uri: "${settings.apiUri}/consumption/last-read",
+        headers: [
+            "Content-Type": "application/json",
+            "x-access-token": state.accessToken
+        ]
+    ]
+
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200) {
+                def data = response.data[0]
+                def device = getChildDevice(meterId)
+                device.sendEvent(name: "meterCount", value: data.meterCount)
+                device.sendEvent(name: "meterId", value: data.meterId)
+                device.sendEvent(name: "read", value: data.read)
+                log.debug "Last Read: ${data}"
+            } else {
+                log.error "Failed to fetch last read: ${response.status} ${response.data}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error fetching last read: ${e.message}"
+    }
+}
+
+def getDailyConsumption(meterId) {
+    def today = new Date().format("yyyy-MM-dd")
+    def params = [
+        uri: "${settings.apiUri}/consumption/daily/${today}/${today}",
+        headers: [
+            "Content-Type": "application/json",
+            "x-access-token": state.accessToken
+        ]
+    ]
+    log.debug "getDailyConsumption is sending: ${settings.apiUri}/consumption/daily/${today}/${today}"
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200) {
+                def data = response.data[0]
+                def device = getChildDevice(meterId)
+                device.sendEvent(name: "todayConsumption", value: data.cons)
+                log.debug "Today's Consumption: ${data.cons}"
+            } else {
+                log.error "Failed to fetch today's consumption: ${response.status} ${response.data}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error fetching daily consumption: ${e.message}"
+    }
+}
+
+def getMonthlyConsumption(meterId) {
+    def today = new Date().format("yyyy-MM-dd")
+    def startOfMonth = today[0..7] + "01"
+    def params = [
+        uri: "${settings.apiUri}/consumption/monthly/${startOfMonth}/${today}",
+        headers: [
+            "Content-Type": "application/json",
+            "x-access-token": state.accessToken
+        ]
+    ]
+    log.debug "getMonthlyConsumption is sending: ${settings.apiUri}/consumption/monthly/${startOfMonth}/${today}"
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200) {
+                def data = response.data[0]
+                def device = getChildDevice(meterId)
+                device.sendEvent(name: "monthlyConsumption", value: data.cons)
+                log.debug "Monthly Consumption: ${data.cons}"
+            } else {
+                log.error "Failed to fetch monthly consumption: ${response.status} ${response.data}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error fetching monthly consumption: ${e.message}"
+    }
+}
+
+def getConsumptionForecast(meterId) {
+    def params = [
+        uri: "${settings.apiUri}/consumption/forecast",
+        headers: [
+            "Content-Type": "application/json",
+            "x-access-token": state.accessToken
+        ]
+    ]
+
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200) {
+                def data = response.data
+                def device = getChildDevice(meterId)
+                if (data && data.estimatedConsumption) {
+                    device.sendEvent(name: "consumptionForecast", value: data.estimatedConsumption.toString())
+                    log.debug "Consumption Forecast: ${data.estimatedConsumption}"
+                } else {
+                    log.error "Forecast data or estimatedConsumption not found in response: ${response.data}"
+                }
+            } else {
+                log.error "Failed to fetch consumption forecast: ${response.status} ${response.data}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error fetching consumption forecast: ${e.message}"
+    }
+}
+
+def schedulePolling() {
+    def pollInterval = settings.pollInterval ?: 60  // Default to 60 minutes if not set
+
+    if (pollInterval > 0) {
+        unschedule(refreshAllDevices)
+
+        // Correctly construct the cron expression based on pollInterval
+        def cronExpression
+        if (pollInterval == 60) {
+            cronExpression = "0 0 * * * ?"
+        } else {
+            cronExpression = "0 0/${pollInterval} * * * ?"
+        }
+
+        log.debug "Scheduled cron expression: ${cronExpression}"
+
+        // Schedule job
+        schedule(cronExpression, refreshAllDevices)
+    } else {
+        log.warn "Invalid polling interval: ${pollInterval}. Polling disabled."
+    }
+}
+
+def refreshAllDevices() {
+    getChildDevices().each { device ->
+        refreshDevice(device.deviceNetworkId)
+        getConsumptionForecast(device.deviceNetworkId)
+        getDailyConsumption(device.deviceNetworkId)
+        getMonthlyConsumption(device.deviceNetworkId)
+    }
+}
