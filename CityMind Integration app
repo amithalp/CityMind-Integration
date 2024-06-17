@@ -9,7 +9,7 @@
 *	Change Revision History:  
 *	Ver		Date:		Who:		What:
 * 	1.0.0	2024-06-15	amithalp	Initial release version
-* 	
+* 	1.0.1   2024-06-17  amithalp    fixed lastPollTime update
 */
 definition(
     name: "CityMind Integration",
@@ -44,7 +44,7 @@ def pageConfig() {
 
 def setVersion() {
     state.name = "CityMind Integration"
-    state.version = "1.0.0"
+    state.version = "1.0.1"
 }
 
 def displayTitle() {
@@ -126,6 +126,13 @@ def refreshDevice(meterId) {
     getDailyConsumption(meterId)
     getMonthlyConsumption(meterId)
     getConsumptionForecast(meterId)
+    updateLastPollTime(meterId)  // Update last poll time
+}
+
+def updateLastPollTime(meterId) {
+    def now = new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone)
+    def device = getChildDevice(meterId)
+    device.sendEvent(name: "lastPollTime", value: now)
 }
 
 def getAccountInfo(meterId) {
@@ -296,5 +303,6 @@ def refreshAllDevices() {
         getConsumptionForecast(device.deviceNetworkId)
         getDailyConsumption(device.deviceNetworkId)
         getMonthlyConsumption(device.deviceNetworkId)
+        updateLastPollTime(device.deviceNetworkId)  // Update last poll time
     }
 }
